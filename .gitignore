@@ -205,3 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Ignore database and backup files
+skill_swap.db
+skill_swap_backup.db
+requirements_backup.txt
