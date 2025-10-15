@@ -1,6 +1,4 @@
-# backend/app.py
 from flask_cors import CORS
-
 from flask import Flask, request, jsonify
 import sqlite3
 import os
@@ -8,27 +6,26 @@ import json
 from datetime import datetime
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from collections import Counter
+
+# Optional: For AI summarizer
+try:
+    from transformers import pipeline
+    summarizer = pipeline("summarization", model="t5-small")
+except Exception:
+    summarizer = None
 
 # Path to the SQLite database file (inside backend folder)
 DB_PATH = os.path.join(os.path.dirname(__file__), 'skillswap.db')
 
 
 def get_db_connection():
-    """
-    Open a connection to the SQLite database.
-    The row_factory makes query results behave like dictionaries.
-    """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    """
-    Create the required tables if they don't exist:
-    - users: stores user profile data
-    - sessions: stores session logs between learner & teacher
-    """
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -61,9 +58,6 @@ CORS(app)
 
 @app.route('/init_db', methods=['POST'])
 def init_db_route():
-    """
-    Initialize the database tables. Call this once before adding data.
-    """
     init_db()
     return jsonify({'status': 'ok', 'message': 'db initialized'})
 
@@ -79,16 +73,13 @@ def add_user():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # 🧠 Check if a user with the same name and location exists
+    # Avoid duplicate entries
     cur.execute("SELECT user_id FROM users WHERE name = ? AND location = ?", (name, location))
     existing = cur.fetchone()
-
     if existing:
-        user_id = existing['user_id']
         conn.close()
-        return jsonify({'status': 'exists', 'user_id': user_id, 'message': 'User already exists.'})
+        return jsonify({'status': 'exists', 'user_id': existing['user_id'], 'message': 'User already exists.'})
 
-    # Otherwise insert new
     cur.execute(
         'INSERT INTO users (name, skills_known, skills_want, location) VALUES (?,?,?,?)',
         (name, skills_known, skills_want, location)
@@ -99,107 +90,162 @@ def add_user():
     return jsonify({'status': 'ok', 'user_id': user_id})
 
 
-
 @app.route('/users', methods=['GET'])
 def get_all_users():
-    """
-    Debug route to see all users in the database.
-    """
     conn = get_db_connection()
-    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM users")
     users = cursor.fetchall()
     conn.close()
 
-    user_list = []
-    for row in users:
-        user_list.append({
-            'id': row['user_id'],
-            'name': row['name'],
-            'skills_known': row['skills_known'],
-            'skills_want': row['skills_want'],
-            'location': row['location']
-        })
+    user_list = [{
+        'id': row['user_id'],
+        'name': row['name'],
+        'skills_known': row['skills_known'],
+        'skills_want': row['skills_want'],
+        'location': row['location']
+    } for row in users]
     return jsonify(user_list)
 
 
+# ✅ AI-Enhanced Hybrid Matching
 @app.route('/get_matches')
 def get_matches():
     """
-    Finds users who are a good match based on complementary skills:
-    - Someone who can teach what the current user wants to learn
-    - Someone who wants to learn what the current user can teach
+    AI-enhanced hybrid matching:
+    Combines logical overlap + semantic similarity (TF-IDF cosine)
     """
-
     user_id = request.args.get('user_id', type=int)
     if not user_id:
         return jsonify({'status': 'error', 'message': 'user_id required'}), 400
 
     conn = get_db_connection()
-    c = conn.cursor()
-    users = c.execute('SELECT * FROM users').fetchall()
+    users = conn.execute('SELECT * FROM users').fetchall()
     conn.close()
 
     if not users:
         return jsonify([])
 
-    # Build user list
     user_list = []
     for row in users:
+        try:
+            skills_known = json.loads(row['skills_known'])
+            skills_want = json.loads(row['skills_want'])
+        except (json.JSONDecodeError, TypeError):
+            skills_known = [row['skills_known']] if row['skills_known'] else []
+            skills_want = [row['skills_want']] if row['skills_want'] else []
         user_list.append({
             'id': row['user_id'],
             'name': row['name'],
-            'skills_known': json.loads(row['skills_known']),
-            'skills_want': json.loads(row['skills_want']),
+            'skills_known': skills_known,
+            'skills_want': skills_want,
             'location': row['location']
         })
 
-    # Find the current user
     current_user = next((u for u in user_list if u['id'] == user_id), None)
     if not current_user:
         return jsonify({'status': 'error', 'message': 'user not found'}), 404
 
+    profiles = [" ".join(u['skills_known'] + u['skills_want']) for u in user_list]
+    vectorizer = TfidfVectorizer(stop_words='english')
+    tfidf_matrix = vectorizer.fit_transform(profiles)
+    cosine_similarities = cosine_similarity(tfidf_matrix)
+    user_index = next(i for i, u in enumerate(user_list) if u['id'] == user_id)
+
     matches = []
-
-    # Compare current user with all others
-    for u in user_list:
-        if u['id'] == current_user['id']:
+    for i, u in enumerate(user_list):
+        if u['id'] == user_id:
             continue
-
-        # Skills overlap calculations
         teaches_you = list(set(u['skills_known']) & set(current_user['skills_want']))
         learns_from_you = list(set(u['skills_want']) & set(current_user['skills_known']))
-        mutual_score = len(teaches_you) + len(learns_from_you)
+        overlap_score = len(teaches_you) + len(learns_from_you)
+        semantic_score = cosine_similarities[user_index][i]
+        final_score = round((0.6 * semantic_score) + (0.4 * overlap_score), 3)
 
-        # Include if at least one meaningful overlap exists
-        if mutual_score > 0:
+        if final_score > 0:
             matches.append({
                 'id': u['id'],
                 'name': u['name'],
                 'location': u['location'],
                 'skills_they_can_teach': teaches_you,
                 'skills_you_can_teach': learns_from_you,
-                'match_score': mutual_score
+                'semantic_score': round(semantic_score, 3),
+                'overlap_score': overlap_score,
+                'match_score': final_score
             })
 
-    # Sort matches by mutual score
     matches = sorted(matches, key=lambda x: x['match_score'], reverse=True)
-
     return jsonify(matches)
+
+
+# ✅ AI Skill Recommendation System
+@app.route('/ai_suggest_skills')
+def ai_suggest_skills():
+    """
+    Suggest new skills for a user to learn based on similar users' skill patterns (TF-IDF similarity)
+    """
+    user_id = request.args.get('user_id', type=int)
+    if not user_id:
+        return jsonify({'status': 'error', 'message': 'user_id required'}), 400
+
+    conn = get_db_connection()
+    users = conn.execute('SELECT * FROM users').fetchall()
+    conn.close()
+
+    user_list = []
+    for row in users:
+        user_list.append({
+            'id': row['user_id'],
+            'name': row['name'],
+            'skills_known': json.loads(row['skills_known']),
+            'skills_want': json.loads(row['skills_want'])
+        })
+
+    current_user = next((u for u in user_list if u['id'] == user_id), None)
+    if not current_user:
+        return jsonify({'status': 'error', 'message': 'user not found'}), 404
+
+    profiles = [" ".join(u['skills_known'] + u['skills_want']) for u in user_list]
+    vectorizer = TfidfVectorizer(stop_words='english')
+    tfidf_matrix = vectorizer.fit_transform(profiles)
+    cosine_similarities = cosine_similarity(tfidf_matrix)
+    user_index = user_list.index(current_user)
+    similarities = cosine_similarities[user_index]
+
+    similar_users = sorted(
+        [(user_list[i], similarities[i]) for i in range(len(user_list)) if i != user_index],
+        key=lambda x: x[1],
+        reverse=True
+    )[:5]
+
+    suggested_skills = set()
+    for u, score in similar_users:
+        for skill in u['skills_want']:
+            if skill not in current_user['skills_known'] and skill not in current_user['skills_want']:
+                suggested_skills.add(skill)
+
+    return jsonify({
+        'user': current_user['name'],
+        'suggested_skills': list(suggested_skills)[:5],
+        'message': "AI-generated recommendations using TF-IDF user similarity."
+    })
+
+
+# ✅ AI Session Summarizer
+@app.route('/summarize_session', methods=['POST'])
+def summarize_session():
+    data = request.get_json()
+    text = data.get("session_notes", "")
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    if summarizer is None:
+        return jsonify({"error": "Summarizer not available. Install transformers."}), 500
+    summary = summarizer(text, max_length=40, min_length=10, do_sample=False)
+    return jsonify({"summary": summary[0]["summary_text"]})
+
 
 @app.route('/add_session', methods=['POST'])
 def add_session():
-    """
-    Log a learning session.
-    JSON body:
-    {
-      "user_id": 1,
-      "teacher_id": 2,
-      "skill": "SQL",
-      "session_notes": "Covered SELECT and WHERE"
-    }
-    """
     data = request.get_json()
     user_id = data.get('user_id')
     teacher_id = data.get('teacher_id')
@@ -221,10 +267,6 @@ def add_session():
 
 @app.route('/get_progress', methods=['GET'])
 def get_progress():
-    """
-    Returns session logs for a user (newest first).
-    Provide ?user_id=1
-    """
     user_id = request.args.get('user_id', type=int)
     if user_id is None:
         return jsonify({'status': 'error', 'message': 'user_id required'}), 400
@@ -233,21 +275,19 @@ def get_progress():
     cur = conn.cursor()
     cur.execute('SELECT * FROM sessions WHERE user_id = ? ORDER BY timestamp DESC', (user_id,))
     sessions = cur.fetchall()
-    out = []
-    for s in sessions:
-        out.append({
-            'session_id': s['session_id'],
-            'teacher_id': s['teacher_id'],
-            'skill': s['skill'],
-            'session_notes': s['session_notes'],
-            'timestamp': s['timestamp']
-        })
+    out = [{
+        'session_id': s['session_id'],
+        'teacher_id': s['teacher_id'],
+        'skill': s['skill'],
+        'session_notes': s['session_notes'],
+        'timestamp': s['timestamp']
+    } for s in sessions]
     conn.close()
     return jsonify(out)
 
+
 @app.route('/user_summary', methods=['GET'])
 def user_summary():
-    """Returns total sessions and last session time for all users"""
     conn = get_db_connection()
     cur = conn.cursor()
     cur.execute("""
@@ -262,69 +302,38 @@ def user_summary():
     rows = cur.fetchall()
     conn.close()
 
-    summaries = []
-    for r in rows:
-        summaries.append({
-            "id": r["user_id"],
-            "name": r["name"],
-            "location": r["location"],
-            "total_sessions": r["total_sessions"],
-            "last_session": r["last_session"]
-        })
+    summaries = [{
+        "id": r["user_id"],
+        "name": r["name"],
+        "location": r["location"],
+        "total_sessions": r["total_sessions"],
+        "last_session": r["last_session"]
+    } for r in rows]
     return jsonify(summaries)
+
 
 @app.route('/top_skills')
 def top_skills():
     conn = get_db_connection()
     cur = conn.cursor()
-
-    # Get all skills_known and skills_want to parse manually
     cur.execute("SELECT skills_known, skills_want FROM users")
     rows = cur.fetchall()
-    
-    teach_skills = []
-    learn_skills = []
-    
+    teach_skills, learn_skills = [], []
+
     for row in rows:
-        # Parse skills_known
         try:
-            skills_known = json.loads(row['skills_known'])
-            if isinstance(skills_known, list):
-                teach_skills.extend(skills_known)
-        except (json.JSONDecodeError, TypeError):
-            # If JSON parsing fails, try to handle as comma-separated string
-            skills_str = row['skills_known']
-            if skills_str and isinstance(skills_str, str):
-                # Remove brackets and quotes if present, then split by comma
-                cleaned = skills_str.strip('[]"\'')
-                skills_list = [s.strip() for s in cleaned.split(',') if s.strip()]
-                teach_skills.extend(skills_list)
-        
-        # Parse skills_want
-        try:
-            skills_want = json.loads(row['skills_want'])
-            if isinstance(skills_want, list):
-                learn_skills.extend(skills_want)
-        except (json.JSONDecodeError, TypeError):
-            # If JSON parsing fails, try to handle as comma-separated string
-            skills_str = row['skills_want']
-            if skills_str and isinstance(skills_str, str):
-                # Remove brackets and quotes if present, then split by comma
-                cleaned = skills_str.strip('[]"\'')
-                skills_list = [s.strip() for s in cleaned.split(',') if s.strip()]
-                learn_skills.extend(skills_list)
-    
-    # Count skills
-    from collections import Counter
-    top_teach = [{"skill": skill, "count": count} for skill, count in Counter(teach_skills).most_common(5)]
-    top_learn = [{"skill": skill, "count": count} for skill, count in Counter(learn_skills).most_common(5)]
-    
+            teach_skills.extend(json.loads(row['skills_known']))
+            learn_skills.extend(json.loads(row['skills_want']))
+        except:
+            pass
+
+    top_teach = [{"skill": s, "count": c} for s, c in Counter(teach_skills).most_common(5)]
+    top_learn = [{"skill": s, "count": c} for s, c in Counter(learn_skills).most_common(5)]
     conn.close()
     return jsonify({"top_teach": top_teach, "top_learn": top_learn})
 
-# Run the app
+
 if __name__ == '__main__':
-    # If DB file doesn't exist, create tables
     if not os.path.exists(DB_PATH):
         init_db()
     app.run(debug=True, port=5000)

@@ -11,7 +11,6 @@ function App() {
   const [topSkills, setTopSkills] = useState({ top_teach: [], top_learn: [] });
   const [summaries, setSummaries] = useState([]);
 
-  // fetch all data on load
   useEffect(() => {
     fetchUsers();
     fetchTopSkills();
@@ -22,7 +21,6 @@ function App() {
     try {
       const res = await fetch(`${API_BASE_URL}/users`);
       const data = await res.json();
-      console.log("Users Response:", data);
       setUsers(data);
     } catch (err) {
       console.error("Error fetching users:", err);
@@ -33,7 +31,6 @@ function App() {
     try {
       const res = await fetch(`${API_BASE_URL}/top_skills`);
       const data = await res.json();
-      console.log("Top Skills Response:", data);
       setTopSkills(data || { top_teach: [], top_learn: [] });
     } catch (err) {
       console.error("Error fetching top skills:", err);
@@ -62,9 +59,9 @@ function App() {
 
     try {
       const res = await fetch(`${API_BASE_URL}/add_user`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(user)
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(user),
       });
       const data = await res.json();
       setUserId(data.user_id);
@@ -73,7 +70,7 @@ function App() {
       fetchTopSkills();
     } catch (error) {
       console.error("Error adding user:", error);
-      alert("Failed to add user. Check the console for details.");
+      alert("Failed to add user.");
     }
   };
 
@@ -107,9 +104,9 @@ function App() {
 
     try {
       await fetch(`${API_BASE_URL}/add_session`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sessionData)
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sessionData),
       });
       alert("✅ Session added!");
       fetchSummaries();
@@ -128,6 +125,45 @@ function App() {
     } catch (err) {
       console.error("Error fetching progress:", err);
       alert("❌ Failed to fetch progress.");
+    }
+  };
+
+  // 🧠 AI Suggest Skills feature
+  const handleSuggestSkills = async () => {
+    if (!userId) return alert("Select a user first!");
+    try {
+      const res = await fetch(`${API_BASE_URL}/ai_suggest_skills?user_id=${userId}`);
+      const data = await res.json();
+      alert(
+        data.suggested_skills && data.suggested_skills.length > 0
+          ? `AI suggests you learn: ${data.suggested_skills.join(", ")}`
+          : "No suggestions available yet."
+      );
+    } catch (err) {
+      console.error("Error fetching AI suggestions:", err);
+      alert("❌ Failed to get suggestions.");
+    }
+  };
+
+  // 📝 AI Summarizer
+  const handleSummarize = async () => {
+    const notes = prompt("Enter a long session note to summarize:");
+    if (!notes) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/summarize_session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_notes: notes }),
+      });
+      const data = await res.json();
+      if (data.summary) {
+        alert(`Summary:\n${data.summary}`);
+      } else {
+        alert(data.error || "No summary generated.");
+      }
+    } catch (err) {
+      console.error("Error summarizing:", err);
+      alert("❌ Failed to summarize.");
     }
   };
 
@@ -188,6 +224,12 @@ function App() {
         <button onClick={handleGetMatches} style={buttonStyle}>Get Matches</button>
         <button onClick={handleAddSession} style={buttonStyle}>Add Session</button>
         <button onClick={handleGetProgress} style={buttonStyle}>Get Progress</button>
+        <button onClick={handleSuggestSkills} style={{ ...buttonStyle, backgroundColor: "#6f42c1" }}>
+          AI Suggest Skills
+        </button>
+        <button onClick={handleSummarize} style={{ ...buttonStyle, backgroundColor: "#20c997" }}>
+          Summarize Notes
+        </button>
       </div>
 
       {/* Skill Trends */}
@@ -202,8 +244,7 @@ function App() {
           boxShadow: "0 2px 10px rgba(0,0,0,0.1)",
           marginBottom: "2rem",
           maxWidth: "750px",
-          marginLeft: "auto",
-          marginRight: "auto",
+          margin: "auto",
         }}
       >
         <h2 style={{ textAlign: "center", color: "#333" }}>Skill Trends</h2>
@@ -276,8 +317,7 @@ function App() {
           boxShadow: "0 2px 10px rgba(0,0,0,0.1)",
           marginBottom: "2rem",
           maxWidth: "750px",
-          marginLeft: "auto",
-          marginRight: "auto",
+          margin: "auto",
         }}
       >
         <h2 style={{ textAlign: "center", color: "#333" }}>User Summary</h2>
@@ -319,14 +359,18 @@ function App() {
         {matches.length > 0 ? (
           <ul style={{ listStyle: "none", paddingLeft: 0 }}>
             {matches.map((m, idx) => (
-              <li key={idx} style={{ 
-                marginBottom: "1rem", 
-                backgroundColor: "white", 
-                padding: "1rem", 
-                borderRadius: "8px",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.1)"
-              }}>
-                <strong>{m.name}</strong> ({m.location}) - Match Score: {m.match_score}
+              <li
+                key={idx}
+                style={{
+                  marginBottom: "1rem",
+                  backgroundColor: "white",
+                  padding: "1rem",
+                  borderRadius: "8px",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
+                }}
+              >
+                <strong>{m.name}</strong> ({m.location}) - Match Score:{" "}
+                {m.match_score}
                 <br />
                 <span style={{ color: "#007bff" }}>
                   Can teach you: {m.skills_they_can_teach.join(", ") || "None"}
@@ -346,14 +390,17 @@ function App() {
         {progress.length > 0 ? (
           <ul style={{ listStyle: "none", paddingLeft: 0 }}>
             {progress.map((p) => (
-              <li key={p.session_id} style={{ 
-                marginBottom: "0.5rem",
-                backgroundColor: "white",
-                padding: "0.75rem",
-                borderRadius: "6px",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.1)"
-              }}>
-                <strong>{p.skill}</strong> → {p.session_notes} 
+              <li
+                key={p.session_id}
+                style={{
+                  marginBottom: "0.5rem",
+                  backgroundColor: "white",
+                  padding: "0.75rem",
+                  borderRadius: "6px",
+                  boxShadow: "0 1px 3px rgba(0,0,0,0.1)",
+                }}
+              >
+                <strong>{p.skill}</strong> → {p.session_notes}
                 <br />
                 <span style={{ fontSize: "0.85rem", color: "#666" }}>
                   {new Date(p.timestamp).toLocaleString()}
